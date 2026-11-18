@@ -1,7 +1,7 @@
 /* Angels Touch — offline support.
    The app's own files are kept on the device so it opens without internet.
    Your music is never uploaded or cached here: it is read straight from your device. */
-const VERSION = 'angels-touch-v1';
+const VERSION = 'angels-touch-v2';
 const CORE = [
   './', './index.html', './manifest.webmanifest',
   './icons/icon-192.png', './icons/icon-512.png', './icons/maskable-512.png',
@@ -40,7 +40,15 @@ self.addEventListener('fetch', e => {
 
   if (url.origin !== location.origin) return;
 
-  // App pages: open instantly from the device, refresh the stored copy in the background.
+  // Other pages (e.g. privacy.html): always try the network first.
+  const scopePath = new URL(self.registration.scope).pathname;
+  const isAppPage = url.pathname === scopePath || url.pathname === scopePath + 'index.html';
+  if (req.mode === 'navigate' && !isAppPage) {
+    e.respondWith(fetch(req).catch(() => caches.match(req).then(r => r || Response.error())));
+    return;
+  }
+
+  // The app page: open instantly from the device, refresh the stored copy in the background.
   if (req.mode === 'navigate') {
     e.respondWith(caches.open(VERSION).then(async c => {
       const cached = await c.match('./index.html');
