@@ -1083,7 +1083,7 @@ const store = {
 const API_HOSTS = ['https://api.audius.co', 'https://discoveryprovider.audius.co'];
 const APP_NAME = 'AngelsTouch';
 // Paste your Jamendo client ID between the quotes to turn Jamendo on for everyone who uses the app.
-const JAMENDO_ID_DEFAULT = '';
+const JAMENDO_ID_DEFAULT = 'a80f28a6';
 const JM_TAGS = [['all','All'],['pop','Pop'],['electronic','Electronic'],['lounge','Chill'],['hiphop','Hip-Hop'],['rock','Rock'],['ambient','Ambient'],['jazz','Jazz'],['acoustic','Acoustic'],['classical','Classical'],['world','World'],['soundtrack','Soundtrack'],['relaxation','Relax']];
 const GENRES = ['All','Electronic','Hip-Hop/Rap','Lo-Fi','Pop','Ambient','Rock','Acoustic','Jazz','Classical','Latin','World','Devotional','House','Alternative','Soundtrack'];
 const AUDIO_EXT = /\.(mp3|m4a|aac|wav|ogg|oga|opus|flac|webm|weba|mp4|aiff?)$/i;
@@ -1109,10 +1109,21 @@ const S = {
   apiHost: API_HOSTS[0]
 };
 let seq = 0;
-const audio = new Audio();
-audio.preload = 'metadata';
-audio.crossOrigin = 'anonymous';
-audio.volume = Math.min(1, Math.max(0, store.get('vol', .85)));
+/* two players: audioC (CORS, routed through the equalizer) for local + Audius songs,
+   audioP (plain) for Jamendo, whose streams don't send CORS headers */
+const mkAudio = cors => { const a = new Audio(); a.preload = 'metadata'; if(cors) a.crossOrigin = 'anonymous'; return a; };
+const audioC = mkAudio(true), audioP = mkAudio(false);
+let audio = audioC;
+audioC.volume = audioP.volume = Math.min(1, Math.max(0, store.get('vol', .85)));
+const onAudio = (ev, fn) => [audioC, audioP].forEach(a => a.addEventListener(ev, e => { if(a === audio) fn(e); }));
+function useEl(t){
+  const want = t && t.provider === 'jamendo' ? audioP : audioC;
+  if(want === audio) return false;
+  const old = audio; want.volume = old.volume; want.muted = old.muted;
+  audio = want;
+  try{ old.pause(); old.removeAttribute('src'); old.load(); }catch(e){}
+  return true;
+}
 
 /* ---------- helpers ---------- */
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -1318,14 +1329,11 @@ async function api(path, params = {}){
   throw last;
 }
 const toTracks = arr => (Array.isArray(arr) ? arr : []).map(fromAudius).filter(Boolean);
-async function cached(k, fn){ if(S.disc.cache.has(k)) return S.disc.cache.get(k); const v = await fn(); S.disc.cache.set(k, v); return v; }
+async function cached(k, fn){ if(S.disc.cache.has(k)) return S.disc.cache.get(k); const v = await fn(); if(!Array.isArray(v) || v.length) S.disc.cache.set(k, v); return v; }
 const getTrending = (genre, time) => cached(`t|${genre}|${time}`, async () => { const p = {time, limit: 40}; if(genre && genre !== 'All') p.genre = genre; return toTracks(await api('/tracks/trending', p)); });
 const getUnderground = () => cached('u', async () => toTracks(await api('/tracks/trending/underground', {limit: 20})));
 const searchOnline = q => cached('s|' + q.toLowerCase(), async () => toTracks(await api('/tracks/search', {query: q, limit: 30})));
-async function jm(params){
-  if(!S.online) throw Object.assign(new Error('off'), {kind: 'disabled'});
-  if(!S.jmId) throw Object.assign(new Error('noid'), {kind: 'noid'});
-  if(navigator.onLine === false) throw Object.assign(new Error('offline'), {kind: 'offline'});
+async function jmOnce(params){
   const qs = new URLSearchParams({client_id: S.jmId, format: 'json', limit: 40, imagesize: 300, audioformat: 'mp32', ...params});
   let r;
   try{ const ctl = new AbortController(); const tm = setTimeout(() => ctl.abort(), 12000); r = await fetch('https://api.jamendo.com/v3.0/tracks/?' + qs, {signal: ctl.signal}); clearTimeout(tm); }
@@ -1335,8 +1343,29 @@ async function jm(params){
   if(j.headers && j.headers.status !== 'success') throw Object.assign(new Error('jm'), {kind: j.headers.code === 5 ? 'badid' : 'error'});
   return (j.results || []).map(fromJamendo).filter(Boolean);
 }
-const getJmTop = (tag, time) => cached(`jm|${tag}|${time}|${S.jmId}`, () => jm({order: 'popularity_' + (time === 'allTime' ? 'total' : time), ...(tag !== 'all' ? {tags: tag} : {})}));
-const searchJm = q => cached(`jms|${q.toLowerCase()}|${S.jmId}`, () => jm({search: q, boost: 'popularity_total', limit: 30}));
+/* Jamendo sometimes answers with an empty list and is fine a moment later, and some
+   sort orders come back empty — so try each variant twice, then move to the next */
+async function jm(variants){
+  if(!S.online) throw Object.assign(new Error('off'), {kind: 'disabled'});
+  if(!S.jmId) throw Object.assign(new Error('noid'), {kind: 'noid'});
+  if(navigator.onLine === false) throw Object.assign(new Error('offline'), {kind: 'offline'});
+  let lastErr = null;
+  for(const v of variants){
+    for(let k = 0; k < 2; k++){
+      try{ const r = await jmOnce(v); if(r.length) return r; lastErr = null; }
+      catch(e){ if(e.kind !== 'error') throw e; lastErr = e; }
+      await new Promise(res => setTimeout(res, 350));
+    }
+  }
+  if(lastErr) throw lastErr;
+  return [];
+}
+function getJmTop(tag, time){
+  const t = time === 'allTime' ? 'total' : time, tp = tag !== 'all' ? {tags: tag} : {};
+  const orders = [...new Set(['popularity_' + t, 'listens_' + t, 'popularity_total', 'buzzrate', ''])];
+  return cached(`jm|${tag}|${time}|${S.jmId}`, () => jm(orders.map(o => o ? {...tp, order: o} : tp)));
+}
+const searchJm = q => cached(`jms|${q.toLowerCase()}|${S.jmId}`, () => jm([{search: q, boost: 'popularity_total', limit: 30}, {search: q, limit: 30}, {namesearch: q, limit: 30}]));
 const ONLINE_ERR = {
   noid: 'Jamendo needs your free client ID. Add it on the Jamendo tab in Discover, or in Settings.',
   badid: 'Jamendo didn’t accept that client ID. Check it was copied correctly in Settings.',
@@ -1816,6 +1845,7 @@ function setShuffle(on){
 function load(t, autoplay){
   if(!t) return;
   S.cur = t; S.playedThis = false;
+  if(useEl(t)) renderEQ();
   audio.src = urlOf(t);
   document.body.classList.add('has-track');
   updateNowPlaying(true); markCurrent(); renderQueue(); saveSession();
@@ -1940,23 +1970,23 @@ function restoreSession(){
   const cur = ts.find(t => t.key === s.cur);
   if(!cur || !playable(cur)) return;
   S.queue = ts.map(t => t.id); S.qi = S.queue.indexOf(cur.id); S.ctx = {label: s.ctx || 'Your library'};
-  S.cur = cur; audio.src = urlOf(cur); document.body.classList.add('has-track');
+  S.cur = cur; useEl(cur); audio.src = urlOf(cur); document.body.classList.add('has-track');
   const seekTo = s.t || 0; if(seekTo) audio.addEventListener('loadedmetadata', () => { try{ audio.currentTime = Math.min(seekTo, (audio.duration || seekTo) - 1); }catch(e){} }, {once: true});
   updateNowPlaying(false); setPlaying(false); renderQueue();
 }
 
-audio.addEventListener('play', () => setPlaying(true));
-audio.addEventListener('pause', () => { setPlaying(false); saveSession(); });
-audio.addEventListener('playing', () => { S.errors = 0; if(!S.playedThis && S.cur){ S.playedThis = true; recordPlay(S.cur); } });
-audio.addEventListener('ended', () => {
+onAudio('play', () => setPlaying(true));
+onAudio('pause', () => { setPlaying(false); saveSession(); });
+onAudio('playing', () => { S.errors = 0; if(!S.playedThis && S.cur){ S.playedThis = true; recordPlay(S.cur); } });
+onAudio('ended', () => {
   if(SLEEP.mode === 'songs'){ SLEEP.left--; if(SLEEP.left <= 0){ finishSleep(); return; } renderSleep(); }
   next(true);
 });
 let lastSess = 0;
-audio.addEventListener('timeupdate', () => { updateProgress(); if(Date.now() - lastSess > 10000){ lastSess = Date.now(); saveSession(); } });
-audio.addEventListener('loadedmetadata', () => { if(S.cur && !S.cur.duration && isFinite(audio.duration)){ S.cur.duration = audio.duration; scheduleRender(); } updateProgress(); });
-audio.addEventListener('volumechange', () => { updateVol(); if(SLEEP.base == null) store.set('vol', audio.volume); });
-audio.addEventListener('error', () => {
+onAudio('timeupdate', () => { updateProgress(); if(Date.now() - lastSess > 10000){ lastSess = Date.now(); saveSession(); } });
+onAudio('loadedmetadata', () => { if(S.cur && !S.cur.duration && isFinite(audio.duration)){ S.cur.duration = audio.duration; scheduleRender(); } updateProgress(); });
+onAudio('volumechange', () => { updateVol(); if(SLEEP.base == null) store.set('vol', audio.volume); });
+onAudio('error', () => {
   if(!S.cur || !audio.getAttribute('src')) return;
   const code = audio.error ? audio.error.code : 0, t = S.cur;
   const why = t.src === 'online' ? (navigator.onLine === false ? 'you’re offline' : 'it couldn’t be streamed') : code === 4 ? `${t.ext} isn’t supported here` : code === 3 ? 'the file looks damaged' : 'the file couldn’t be read';
@@ -2057,7 +2087,7 @@ function setupAudio(){
     const link = () => {
       if(linked || actx.state !== 'running') return;
       try{
-        const src = actx.createMediaElementSource(audio);
+        const src = actx.createMediaElementSource(audioC);
         preNode = actx.createGain();
         filters = BANDS.map((f, i) => { const b = actx.createBiquadFilter(); b.type = i === 0 ? 'lowshelf' : i === BANDS.length - 1 ? 'highshelf' : 'peaking'; b.frequency.value = f; b.Q.value = 1.1; b.gain.value = 0; return b; });
         analyser = actx.createAnalyser(); analyser.fftSize = 512; analyser.smoothingTimeConstant = .8;
@@ -2152,7 +2182,8 @@ function renderEQ(){
   $('#preamp').value = EQ.pre; $('#preamp').style.setProperty('--p', ((EQ.pre + 12) / 18 * 100) + '%');
   $('#preOut').textContent = (EQ.pre > 0 ? '+' : '') + EQ.pre + ' dB';
   const note = $('#eqNote'); note.classList.remove('warn');
-  if(audioBroken){ note.textContent = 'The equalizer can’t run in this viewer. Open the app at nikhilmundchhina-cmd.github.io/angels-touch to use it.'; note.classList.add('warn'); }
+  if(audio === audioP && S.cur){ note.textContent = 'Jamendo songs stream straight from Jamendo, so the equalizer can’t shape them. It works on your own music and Audius songs.'; note.classList.add('warn'); }
+  else if(audioBroken){ note.textContent = 'The equalizer can’t run in this viewer. Open the app at nikhilmundchhina-cmd.github.io/angels-touch to use it.'; note.classList.add('warn'); }
   else if(linked) note.textContent = EQ.on ? `${EQ.preset} · changes apply instantly. Drag the dots, or double-click one to reset it.` : 'Switch on, or pick a preset, to shape the sound.';
   else note.textContent = EQ.on ? 'Ready — press play and the equalizer starts with your music.' : 'Switch on, or pick a preset, to shape the sound.';
   const tab = $('.pane-tab[data-pane=eq]'); if(tab) tab.classList.toggle('has', EQ.on);
@@ -2169,11 +2200,11 @@ function frame(time){
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
   if(cv.width !== Math.round(w * dpr)){ cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr); }
   g2.setTransform(dpr, 0, 0, dpr, 0, 0); g2.clearRect(0, 0, w, h);
-  const playing = !audio.paused;
-  if(analyser && playing) analyser.getByteFrequencyData(freq);
+  const playing = !audio.paused, live = analyser && playing && audio === audioC;
+  if(live) analyser.getByteFrequencyData(freq);
   for(let i = 0; i < NB; i++){
     let v = 0;
-    if(analyser && playing){ const lo = Math.floor(Math.pow(i / NB, 1.7) * 170) + 1, hi = Math.max(lo + 1, Math.floor(Math.pow((i + 1) / NB, 1.7) * 170) + 1); let s = 0; for(let k = lo; k < hi; k++) s += freq[k]; v = Math.pow(s / (hi - lo) / 255, 1.5); }
+    if(live){ const lo = Math.floor(Math.pow(i / NB, 1.7) * 170) + 1, hi = Math.max(lo + 1, Math.floor(Math.pow((i + 1) / NB, 1.7) * 170) + 1); let s = 0; for(let k = lo; k < hi; k++) s += freq[k]; v = Math.pow(s / (hi - lo) / 255, 1.5); }
     else if(playing) v = .18 + .12 * Math.sin(time / 300 + i * .5);
     levels[i] += (v - levels[i]) * (v > levels[i] ? .45 : .1);
   }
@@ -2260,7 +2291,7 @@ async function lrclibFind(t){
 function saveLyricsOnline(t, r){ const text = r.syncedLyrics || r.plainLyrics; if(!text) return false; store.set('lyr:' + t.key, {text, src: 'LRCLIB'}); t.lyr = undefined; return true; }
 function waitDuration(t){
   if(t.duration || (S.cur === t && isFinite(audio.duration) && audio.duration)) return Promise.resolve();
-  return new Promise(res => { const done = () => { audio.removeEventListener('loadedmetadata', done); res(); }; audio.addEventListener('loadedmetadata', done); setTimeout(done, 4000); });
+  return new Promise(res => { const a = audio, done = () => { a.removeEventListener('loadedmetadata', done); res(); }; a.addEventListener('loadedmetadata', done); setTimeout(done, 4000); });
 }
 async function autoLyrics(t){
   t.onlineTried = true; t.onlineState = 'searching'; if(S.cur === t) renderLyrics();

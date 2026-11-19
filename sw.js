@@ -1,7 +1,7 @@
 /* Angels Touch — offline support.
    The app's own files are kept on the device so it opens without internet.
    Your music is never uploaded or cached here: it is read straight from your device. */
-const VERSION = 'angels-touch-v4';
+const VERSION = 'angels-touch-v5';
 const CORE = [
   './', './index.html', './manifest.webmanifest',
   './icons/icon-192.png', './icons/icon-512.png', './icons/maskable-512.png',
