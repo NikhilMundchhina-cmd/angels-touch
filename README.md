@@ -1,6 +1,9 @@
 # Angels Touch — install it as an app
 
-Offline music player · Developed by **Nikhil**
+Music player · version 2.1 · Developed by **Nikhil**
+
+**New in 2.0:** mobile-app design, Home, Discover (free online music from Audius), Albums, Artists, Playlists and an Up Next queue.
+**New in 2.1:** Jamendo — 600,000+ free Creative Commons songs. Get a free client ID at devportal.jamendo.com and paste it in Settings (or put it in `JAMENDO_ID_DEFAULT` near the top of the script in index.html to turn Jamendo on for everyone).
 
 This folder is the complete app:
 
@@ -11,7 +14,7 @@ This folder is the complete app:
 | `sw.js` | Keeps the app on your device so it opens without internet |
 | `icons/` | App icons for phones, tablets and computers |
 
-Your music is never uploaded anywhere. The app reads songs straight from your device.
+Your music is never uploaded anywhere. The app reads songs straight from your device. Online songs stream from Audius and Jamendo.
 
 ---
 
